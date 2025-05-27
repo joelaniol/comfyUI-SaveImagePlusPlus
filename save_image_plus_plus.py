@@ -1,5 +1,6 @@
 import os
 import re
+import json
 from datetime import datetime
 
 import numpy as np
@@ -220,7 +221,8 @@ class SaveImagePlusPlus:
                 default_meta = _get_default_pnginfo()
                 for k, v in default_meta.items():
                     try:
-                        info.add_text(str(k), str(v))
+                        text = v if isinstance(v, str) else json.dumps(v)
+                        info.add_text(str(k), text)
                     except Exception:
                         pass
             if metadata:
