@@ -1,6 +1,6 @@
 # comfyUI-SaveImagePlusPlus
 
-`SaveImagePlusPlus` ist ein Plugin für ComfyUI, das es ermöglicht, Bilder mit erweiterten Optionen abzuspeichern. Der Node akzeptiert ein Bild und speichert es in einem wählbaren Format (PNG, JPEG, WEBP oder TIFF). Zusätzlich können DPI, Qualität und optionale Metadaten gesetzt werden. Über den Parameter `subfolder` lassen sich Unterordner im Ausgabeverzeichnis anlegen.
+`SaveImagePlusPlus` ist ein Plugin für ComfyUI, das es ermöglicht, Bilder mit erweiterten Optionen abzuspeichern. Der Node akzeptiert ein Bild und speichert es in einem wählbaren Format (PNG, JPEG, WEBP oder TIFF). Zusätzlich können DPI, Qualität und optionale Metadaten gesetzt werden. Über den Parameter `subfolder` lassen sich Unterordner im Ausgabeverzeichnis anlegen. Der angegebene Pfad wird dabei mit `os.path.normpath` bereinigt; absolute Pfade oder Angaben, die mit `..` beginnen, werden verworfen.
 
 ## Funktionsweise
 

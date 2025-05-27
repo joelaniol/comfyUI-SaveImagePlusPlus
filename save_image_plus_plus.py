@@ -174,7 +174,11 @@ class SaveImagePlusPlus:
         import folder_paths
         base_dir = folder_paths.get_output_directory()
         if use_custom_folder and custom_folder.strip():
-            base_dir = os.path.join(base_dir, custom_folder.strip())
+            # Pfad bereinigen und Traversal verhindern
+            sanitized = os.path.normpath(custom_folder.strip())
+            if os.path.isabs(sanitized) or sanitized.startswith('..') or sanitized.startswith(f"..{os.sep}"):
+                raise ValueError("Ungültiger Unterordner")
+            base_dir = os.path.join(base_dir, sanitized)
         os.makedirs(base_dir, exist_ok=True)
 
         # 4.2  Dateinamen mit Platzhaltern
