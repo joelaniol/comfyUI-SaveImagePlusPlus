@@ -12,7 +12,7 @@
    - `dpi`: Auflösung, z. B. `[300, 300]`.
    - `quality`: JPEG/WEBP-Qualität (1–100).
    - `metadata`: Bei PNGs kann ein einfacher `tEXt`-Chunk mit dem Hinweis "GeneratedWith: ComfyUI SaveImagePlusPlus" gespeichert werden.
-   - `include_workflow_meta`: Fügt die von ComfyUI erzeugten Workflow-Metadaten mit in den PNG-`tEXt`-Chunk ein.
+   - `include_workflow_meta`: Fügt die von ComfyUI erzeugten Workflow-Metadaten mit in den PNG-`tEXt`-Chunk ein. Nicht-String-Werte werden dabei als JSON gespeichert.
 4. **Speichern**  
    Das Bild wird mit den gewählten Optionen abgespeichert und erzeugt keinen weiteren Node-Ausgang.
 
