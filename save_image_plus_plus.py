@@ -88,6 +88,31 @@ def _numpy_to_pil(a):
     return Image.fromarray(arr)
 
 
+def _get_default_pnginfo():
+    """Best effort: retrieve ComfyUI's default metadata."""
+    import importlib
+    candidates = [
+        ("nodes.save_image", ("get_pnginfo", "get_png_info", "get_metadata")),
+        ("nodes", ("get_pnginfo", "get_png_info", "get_metadata")),
+        ("comfy.utils", ("get_pnginfo", "generate_pnginfo", "generate_workflow_metadata")),
+    ]
+    for mod_name, funcs in candidates:
+        try:
+            module = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        for fn in funcs:
+            func = getattr(module, fn, None)
+            if callable(func):
+                try:
+                    data = func()
+                except Exception:
+                    continue
+                if isinstance(data, dict):
+                    return data
+    return {}
+
+
 # ------------------------------------------------------------
 # 4) Der eigentliche ComfyUI-Node
 # ------------------------------------------------------------
@@ -99,6 +124,7 @@ class SaveImagePlusPlus:
       • PNG / JPEG / WEBP / TIFF, Qualität 100
       • DPI-Flag, optionale PNG-Metadaten
       • akzeptiert torch.Tensor, numpy.ndarray, PIL.Image
+      • optional: Workflow-Metadaten im PNG speichern
     """
     CATEGORY    = "image/output"
     OUTPUT_NODE = True
@@ -120,6 +146,8 @@ class SaveImagePlusPlus:
                                       {"default": 100, "min": 1, "max": 100}),
                 "metadata":          ("BOOLEAN",
                                       {"default": False}),
+                "include_workflow_meta": ("BOOLEAN",
+                                          {"default": False}),
                 "use_custom_folder": ("BOOLEAN",
                                       {"default": False}),
                 "custom_folder":     ("STRING",
@@ -138,6 +166,7 @@ class SaveImagePlusPlus:
                    dpi,
                    quality,
                    metadata,
+                   include_workflow_meta,
                    use_custom_folder,
                    custom_folder):
 
@@ -181,9 +210,17 @@ class SaveImagePlusPlus:
         if fmt in ("JPEG", "WEBP"):
             kwargs["quality"] = int(quality)
 
-        if metadata and fmt == "PNG":
+        if fmt == "PNG" and (metadata or include_workflow_meta):
             info = PngImagePlugin.PngInfo()
-            info.add_text("GeneratedWith", "ComfyUI SaveImagePlusPlus")
+            if include_workflow_meta:
+                default_meta = _get_default_pnginfo()
+                for k, v in default_meta.items():
+                    try:
+                        info.add_text(str(k), str(v))
+                    except Exception:
+                        pass
+            if metadata:
+                info.add_text("GeneratedWith", "ComfyUI SaveImagePlusPlus")
             kwargs["pnginfo"] = info
 
         # 4.5  Speichern
