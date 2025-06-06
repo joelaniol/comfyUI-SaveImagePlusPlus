@@ -1,26 +1,42 @@
+"""
+SaveImagePlusPlus – erweiterter Output-Node für ComfyUI
+v2025-06-05  (Joel-Fix 5)
+
+• PNG, JPEG, WEBP, TIFF speichern exakt dieselben Metadaten
+  (prompt, workflow …) wie der Standard-Save-PNG-Node.
+• Nutzt die von ComfyUI gelieferten Hidden-Inputs 'prompt' und
+  'extra_pnginfo' – dadurch versionssicher.
+• Neuer Optionsschalter **lossless**:
+    – JPEG:  quality = 100, subsampling = 0 (4:4:4), optimize = True  
+    – WEBP:  lossless = True  
+    – TIFF:  compression = "none"  
+    – PNG:   bleibt unverändert, da ohnehin verlustfrei
+"""
+
 import os
 import re
 import json
+import struct
 from datetime import datetime
 
 import numpy as np
 from PIL import Image, PngImagePlugin
 
-# — PyTorch ist in ComfyUI fast immer vorhanden —
+# ─ PyTorch ist in ComfyUI fast immer vorhanden ──────────────────────────────
 try:
     import torch
 except ImportError:
     torch = None
 
 
-# ------------------------------------------------------------
-# 1) Platzhalter %date:…%  →  aktuelles Datum/Zeit einsetzen
-# ------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# 1) Platzhalter %date:…%  → aktuelles Datum/Zeit
+# ─────────────────────────────────────────────────────────────────────────────
 _DATE_TOKEN_RE = re.compile(r"%date:([^%]+)%")
-_DATE_MAP = {"yyyy": "%Y", "yy": "%y",
-             "MM": "%m",  "dd": "%d",
-             "HH": "%H",  "hh": "%H",   # 24-h
-             "mm": "%M",  "ss": "%S"}
+_DATE_MAP      = {"yyyy": "%Y", "yy": "%y",
+                  "MM": "%m",  "dd": "%d",
+                  "HH": "%H",  "hh": "%H",
+                  "mm": "%M",  "ss": "%S"}
 
 def _expand_placeholders(text: str) -> str:
     def _repl(m):
@@ -31,176 +47,107 @@ def _expand_placeholders(text: str) -> str:
     return _DATE_TOKEN_RE.sub(_repl, text)
 
 
-# ------------------------------------------------------------
-# 2) Kanal-Heuristik  →  Tensor/Array in Form [3, H, W] bringen
-# ------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# 2) Bild-Helper  (Tensor / Array → CHW → PIL.Image)
+# ─────────────────────────────────────────────────────────────────────────────
 def _to_chw(t):
     is_torch = torch is not None and isinstance(t, torch.Tensor)
-
-    # -------- Batch-Dimension entfernen --------
-    if t.ndim == 4:              # [B, …]  →  erstes Bild
-        t = t[0]
-
-    # -------- 2-D Graustufe unterstützen -------
-    if t.ndim == 2:              # [H,W] → [1,H,W] oder [H,W,1]
-        t = (t[None, ...] if is_torch else t[..., None])
-
-    if t.ndim != 3:
-        raise TypeError(f"Unerwartete Dimension: {tuple(t.shape)}")
-
-    # -------- Erkennen, wo die Kanäle liegen ----
-    c_first = t.shape[0] <= 4           # [C,H,W]
-    c_last  = t.shape[-1] <= 4          # [H,W,C]
-
-    if c_first and not c_last:          # Kanäle vorn
-        chw = t
-    elif c_last and not c_first:        # Kanäle hinten
-        chw = t.permute(2, 0, 1) if is_torch else np.transpose(t, (2, 0, 1))
-    else:                               # beides oder keins → nehmen vorn
-        chw = t
-
-    # -------- Kanalzahl normalisieren ----------
-    if chw.shape[0] == 1:               # Graustufe → RGB
-        chw = chw.repeat(3, 1, 1) if is_torch else np.repeat(chw, 3, axis=0)
-    elif chw.shape[0] in (3, 4):        # RGB / RGBA ok
-        pass
-    else:                               # z. B. 1536 Kanäle → 1. Kanal als Graustufe
+    if t.ndim == 4: t = t[0]                         # Batch entfernen
+    if t.ndim == 2: t = (t[None] if is_torch else t[..., None])
+    if t.ndim != 3: raise TypeError(f"Unerwartete Dimension: {t.shape}")
+    c_first, c_last = t.shape[0] <= 4, t.shape[-1] <= 4
+    chw = (t if c_first and not c_last else
+           (t.permute(2, 0, 1) if is_torch else np.transpose(t, (2, 0, 1)))
+           if c_last and not c_first else t)
+    if   chw.shape[0] == 1:
+        chw = chw.repeat(3, 1, 1) if is_torch else np.repeat(chw, 3, 0)
+    elif chw.shape[0] not in (3, 4):
         g = chw[0:1]
-        chw = g.repeat(3, 1, 1) if is_torch else np.repeat(g, 3, axis=0)
-
+        chw = g.repeat(3, 1, 1) if is_torch else np.repeat(g, 3, 0)
     return chw
 
-
-# ------------------------------------------------------------
-# 3) Hilfsfunktionen: nach PIL.Image konvertieren
-# ------------------------------------------------------------
 def _tensor_to_pil(t):
-    chw = _to_chw(t)
-    arr = (
-        chw.detach().clamp(0, 1).mul(255).to(torch.uint8).cpu().numpy()
-    )
-    arr = np.transpose(arr, (1, 2, 0))        # [H,W,C]
-    return Image.fromarray(arr)
+    arr = _to_chw(t).detach().clamp(0, 1).mul(255).to(torch.uint8).cpu().numpy()
+    return Image.fromarray(np.transpose(arr, (1, 2, 0)))
 
 def _numpy_to_pil(a):
-    chw = _to_chw(a)
-    arr = (np.clip(chw, 0, 1) * 255).astype(np.uint8)
-    arr = np.transpose(arr, (1, 2, 0))
-    return Image.fromarray(arr)
+    arr = _to_chw(a)
+    arr = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
+    return Image.fromarray(np.transpose(arr, (1, 2, 0)))
 
 
-def _get_default_pnginfo():
-    """Best effort: retrieve ComfyUI's default metadata."""
-    import importlib
-    candidates = [
-        ("nodes.save_image", ("get_pnginfo", "get_png_info", "get_metadata")),
-        ("nodes", ("get_pnginfo", "get_png_info", "get_metadata")),
-        ("comfy.utils", ("get_pnginfo", "generate_pnginfo", "generate_workflow_metadata")),
-    ]
-    for mod_name, funcs in candidates:
-        try:
-            module = importlib.import_module(mod_name)
-        except Exception:
-            continue
-        for fn in funcs:
-            func = getattr(module, fn, None)
-            if callable(func):
-                try:
-                    data = func()
-                except Exception:
-                    continue
-                if isinstance(data, dict):
-                    return data
-    return {}
+# ─────────────────────────────────────────────────────────────────────────────
+# 3) JPEG-Kommentar-Segment (Fallback < Pillow 9.4)
+# ─────────────────────────────────────────────────────────────────────────────
+def _make_jpeg_comment_segment(payload: bytes) -> bytes:
+    return b"\xFF\xFE" + struct.pack(">H", 2 + len(payload)) + payload
 
 
-# ------------------------------------------------------------
-# 4) Der eigentliche ComfyUI-Node
-# ------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# 4) SaveImagePlusPlus-Node
+# ─────────────────────────────────────────────────────────────────────────────
 class SaveImagePlusPlus:
-    """
-    Speichert ein Bild:
-      • Dateiname mit %date:…%-Platzhaltern
-      • Standard-Output-Ordner oder eigener Unterordner
-      • PNG / JPEG / WEBP / TIFF, Qualität 100
-      • DPI-Flag, optionale PNG-Metadaten
-      • akzeptiert torch.Tensor, numpy.ndarray, PIL.Image
-      • optional: Workflow-Metadaten im PNG speichern
-    """
-    CATEGORY    = "image/output"
-    OUTPUT_NODE = True
+    CATEGORY, OUTPUT_NODE = "image/output", True
 
-    # -------- Eingänge / Widgets ------------------------------
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image":             ("IMAGE",),
-                "file_name":         ("STRING",
-                                      {"default":
-                                       "%date:yyyyMMdd%_%date:HHmmss%_standard_"}),
-                "format":            (["PNG", "JPEG", "WEBP", "TIFF"],
-                                      {"default": "PNG"}),
-                "dpi":               ("INT",
-                                      {"default": 300, "min": 1, "max": 12000}),
-                "quality":           ("INT",
-                                      {"default": 100, "min": 1, "max": 100}),
-                "metadata":          ("BOOLEAN",
-                                      {"default": False}),
-                "include_workflow_meta": ("BOOLEAN",
-                                          {"default": False}),
-                "use_custom_folder": ("BOOLEAN",
-                                      {"default": False}),
-                "custom_folder":     ("STRING",
-                                      {"default": ""}),
+                "image":  ("IMAGE",),
+                "file_name": ("STRING", {
+                    "default": "%date:yyyyMMdd%_%date:HHmmss%_standard_"
+                }),
+                "format": (["PNG", "JPEG", "WEBP", "TIFF"], {"default": "PNG"}),
+                "dpi":    ("INT", {"default": 300, "min": 1, "max": 12000}),
+                "quality":("INT", {"default": 100, "min": 1, "max": 100}),
+                "lossless": ("BOOLEAN", {"default": False}),
+                "metadata": ("BOOLEAN", {"default": False}),
+                "include_workflow_meta": ("BOOLEAN", {"default": False}),
+                "use_custom_folder": ("BOOLEAN", {"default": False}),
+                "custom_folder": ("STRING", {"default": ""}),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             }
         }
 
-    RETURN_TYPES = ()          # kein sichtbarer Output
+    RETURN_TYPES = ()
     FUNCTION     = "save_image"
 
-    # -------- Hauptlogik --------------------------------------
-    def save_image(self,
-                   image,
-                   file_name,
-                   format,
-                   dpi,
-                   quality,
-                   metadata,
-                   include_workflow_meta,
-                   use_custom_folder,
-                   custom_folder):
-
-        # 4.1  Zielordner bestimmen
+    # -------------------------------------------------------------------------
+    def save_image(
+        self, image, file_name, format, dpi, quality, lossless,
+        metadata, include_workflow_meta, use_custom_folder, custom_folder,
+        prompt=None, extra_pnginfo=None,
+    ):
+        # 4.1 Zielordner
         import folder_paths
         base_dir = folder_paths.get_output_directory()
         if use_custom_folder and custom_folder.strip():
-            # Pfad bereinigen und Traversal verhindern
-            sanitized = os.path.normpath(custom_folder.strip())
-            if os.path.isabs(sanitized) or sanitized.startswith('..') or sanitized.startswith(f"..{os.sep}"):
+            safe = os.path.normpath(custom_folder.strip())
+            if os.path.isabs(safe) or safe.startswith(".."):
                 raise ValueError("Ungültiger Unterordner")
-            base_dir = os.path.join(base_dir, sanitized)
+            base_dir = os.path.join(base_dir, safe)
         os.makedirs(base_dir, exist_ok=True)
 
-        # 4.2  Dateinamen mit Platzhaltern
+        # 4.2 Dateiname
         name = _expand_placeholders(file_name.strip())
         fmt  = format.upper()
-        ext  = "." + fmt.lower()
-        if not name.lower().endswith(ext):
-            name += ext
-
+        if not name.lower().endswith("." + fmt.lower()):
+            name += "." + fmt.lower()
         out_path = os.path.join(base_dir, name)
-        if os.path.exists(out_path):               # durchnummerieren
-            stem, ext_only = os.path.splitext(name)
+        if os.path.exists(out_path):
+            stem, ext = os.path.splitext(name)
             i = 1
             while True:
-                alt = os.path.join(base_dir, f"{stem}_{i}{ext_only}")
+                alt = os.path.join(base_dir, f"{stem}_{i}{ext}")
                 if not os.path.exists(alt):
                     out_path = alt
                     break
                 i += 1
 
-        # 4.3  Eingabe → PIL.Image
+        # 4.3 PIL-Bild erzeugen
         if torch is not None and isinstance(image, torch.Tensor):
             img = _tensor_to_pil(image)
         elif isinstance(image, np.ndarray):
@@ -210,30 +157,64 @@ class SaveImagePlusPlus:
         else:
             raise TypeError(f"Bildtyp nicht unterstützt: {type(image).__name__}")
 
-        # 4.4  Save-Parameter
+        # 4.4 Basis-Save-Parameter
         kwargs = {"dpi": (dpi, dpi)}
-        if fmt in ("JPEG", "WEBP"):
-            kwargs["quality"] = int(quality)
+        if fmt == "JPEG":
+            if lossless:
+                kwargs.update({"quality": 100, "subsampling": 0, "optimize": True})
+            else:
+                kwargs["quality"] = int(quality)
+        elif fmt == "WEBP":
+            if lossless:
+                kwargs["lossless"] = True
+            else:
+                kwargs["quality"] = int(quality)
+        elif fmt == "TIFF":
+            kwargs["compression"] = "none" if lossless else "tiff_adobe_deflate"
+        # PNG hat immer verlustfreie Kompression; keine weiteren Flags nötig.
 
-        if fmt == "PNG" and (metadata or include_workflow_meta):
+        # 4.5 Metadaten sammeln
+        meta = {}
+        if include_workflow_meta:
+            if isinstance(extra_pnginfo, dict):
+                meta.update(extra_pnginfo)       # enthält prompt, workflow, …
+            if prompt is not None and "prompt" not in meta:
+                meta["prompt"] = prompt
+        if metadata:
+            meta["GeneratedWith"] = "ComfyUI SaveImagePlusPlus"
+
+        # 4.6 PNG-Pfad
+        if fmt == "PNG" and meta:
             info = PngImagePlugin.PngInfo()
-            if include_workflow_meta:
-                default_meta = _get_default_pnginfo()
-                for k, v in default_meta.items():
-                    try:
-                        text = v if isinstance(v, str) else json.dumps(v)
-                        info.add_text(str(k), text)
-                    except Exception:
-                        pass
-            if metadata:
-                info.add_text("GeneratedWith", "ComfyUI SaveImagePlusPlus")
+            for k, v in meta.items():
+                try:
+                    info.add_text(str(k), v if isinstance(v, str) else json.dumps(v))
+                except Exception:
+                    pass
             kwargs["pnginfo"] = info
 
-        # 4.5  Speichern
+        # 4.7 JPEG / WEBP / TIFF
+        elif fmt in ("JPEG", "WEBP", "TIFF") and meta:
+            meta_json = json.dumps(meta, ensure_ascii=False)
+            if fmt == "JPEG":
+                # Pillow ≥ 9.4 unterstützt comment=
+                try:
+                    img.save(os.devnull, "JPEG", comment=b"")
+                    kwargs["comment"] = meta_json
+                except Exception:
+                    exif = img.getexif()
+                    exif[0x9286] = meta_json       # UserComment
+                    kwargs["exif"] = exif
+            else:                                  # WEBP / TIFF
+                exif = img.getexif()
+                exif[0x9286] = meta_json
+                kwargs["exif"] = exif
+
+        # 4.8 Speichern
         img.save(out_path, fmt, **kwargs)
         return ()
 
 
-# -------- Registrierung für ComfyUI --------------------------
+# ─ Registrierung für ComfyUI ────────────────────────────────────────────────
 NODE_CLASS_MAPPINGS        = {"SaveImagePlusPlus": SaveImagePlusPlus}
 NODE_DISPLAY_NAME_MAPPINGS = {"SaveImagePlusPlus": "Save Image Plus++"}
